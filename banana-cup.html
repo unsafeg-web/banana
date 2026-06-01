@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>🍌 バナナカップ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a3d0a; overflow: hidden; touch-action: none; user-select: none; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const W = () => canvas.width;
+const H = () => canvas.height;
+
+// ── ゲーム状態 ────────────────────────────────────────────
+const cup = { get x() { return W() / 2; }, y: 90, r: 32 };
+const LAUNCH_Y_OFFSET = 110;
+
+let bananas = [];      // グリーンに落ちたバナナ
+let cupBananas = [];   // カップに入ったバナナ
+let flying = null;     // 飛行中バナナ
+let touchStart = null;
+let touchCurrent = null;
+let score = 0;
+let attempts = 0;
+let flashTimer = 0;
+let celebTimer = 0;
+
+const GRAVITY = 0.35;
+const MAX_POWER = 22;
+
+// ── Web Audio ──────────────────────────────────────────────
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playSuccess() {
+  const ac = getAudio();
+  const melody = [523, 659, 784, 1047];
+  melody.forEach((freq, i) => {
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain);
+    gain.connect(ac.destination);
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const t = ac.currentTime + i * 0.12;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.35, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+    osc.start(t);
+    osc.stop(t + 0.3);
+  });
+}
+
+function playThud() {
+  const ac = getAudio();
+  const n = Math.floor(ac.sampleRate * 0.15);
+  const buf = ac.createBuffer(1, n, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (n * 0.2));
+  }
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  const gain = ac.createGain();
+  gain.gain.value = 0.4;
+  src.connect(gain);
+  gain.connect(ac.destination);
+  src.start();
+}
+
+function playWhoosh() {
+  const ac = getAudio();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(400, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(100, ac.currentTime + 0.3);
+  gain.gain.setValueAtTime(0.15, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.3);
+  osc.start(ac.currentTime);
+  osc.stop(ac.currentTime + 0.3);
+}
+
+// ── タッチ / マウス ────────────────────────────────────────
+function pointerStart(x, y) {
+  if (flying) return;
+  touchStart = { x, y };
+  touchCurrent = { x, y };
+}
+function pointerMove(x, y) {
+  if (!touchStart) return;
+  touchCurrent = { x, y };
+}
+function pointerEnd() {
+  if (!touchStart || flying) { touchStart = null; return; }
+  const dx = touchCurrent.x - touchStart.x;
+  const dy = touchCurrent.y - touchStart.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 8) { touchStart = null; touchCurrent = null; return; }
+  const power = Math.min(dist / 12, MAX_POWER);
+  const angle = Math.atan2(dy, dx);
+  launch(Math.cos(angle) * power, Math.sin(angle) * power);
+  touchStart = null;
+  touchCurrent = null;
+}
+
+canvas.addEventListener('touchstart', e => { e.preventDefault(); const t = e.touches[0]; pointerStart(t.clientX, t.clientY); }, { passive: false });
+canvas.addEventListener('touchmove',  e => { e.preventDefault(); const t = e.touches[0]; pointerMove(t.clientX, t.clientY); },  { passive: false });
+canvas.addEventListener('touchend',   e => { e.preventDefault(); pointerEnd(); }, { passive: false });
+canvas.addEventListener('mousedown',  e => pointerStart(e.clientX, e.clientY));
+canvas.addEventListener('mousemove',  e => pointerMove(e.clientX, e.clientY));
+canvas.addEventListener('mouseup',    () => pointerEnd());
+
+// ── バナナ発射 ────────────────────────────────────────────
+function launch(vx, vy) {
+  flying = {
+    x: W() / 2,
+    y: H() - LAUNCH_Y_OFFSET,
+    vx, vy,
+    rot: 0,
+    trail: [],
+    age: 0,
+  };
+  attempts++;
+  playWhoosh();
+}
+
+// ── 更新 ─────────────────────────────────────────────────
+function update() {
+  if (flashTimer > 0) flashTimer--;
+  if (celebTimer > 0) celebTimer--;
+  if (!flying) return;
+
+  flying.trail.push({ x: flying.x, y: flying.y });
+  if (flying.trail.length > 20) flying.trail.shift();
+
+  flying.x += flying.vx;
+  flying.y += flying.vy;
+  flying.vy += GRAVITY;
+  flying.rot += flying.vx * 0.06;
+  flying.age++;
+
+  // カップイン判定
+  const dx = flying.x - cup.x;
+  const dy = flying.y - cup.y;
+  if (Math.hypot(dx, dy) < cup.r * 1.1 && flying.vy > -5) {
+    score++;
+    flashTimer = 40;
+    celebTimer = 60;
+    playSuccess();
+    cupBananas.push({
+      x: cup.x + (Math.random() - 0.5) * 18,
+      y: cup.y,
+      rot: -0.4 + Math.random() * 0.8,
+    });
+    flying = null;
+    return;
+  }
+
+  // 着地 or 画面外
+  if (flying.y > H() - 30) {
+    playThud();
+    bananas.push({
+      x: Math.max(30, Math.min(W() - 30, flying.x)),
+      y: H() - 45,
+      rot: Math.random() * Math.PI * 2,
+    });
+    flying = null;
+  } else if (flying.x < -60 || flying.x > W() + 60 || flying.y < -200) {
+    flying = null;
+  }
+}
+
+// ── 描画ヘルパー ──────────────────────────────────────────
+function drawEmoji(emoji, x, y, rot, size) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.font = `${size}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, 0, 0);
+  ctx.restore();
+}
+
+function drawGreen() {
+  const g = ctx.createLinearGradient(0, 0, 0, H());
+  g.addColorStop(0, '#14330a');
+  g.addColorStop(1, '#2a5216');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W(), H());
+
+  // 芝目ライン
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.025)';
+  ctx.lineWidth = 1;
+  for (let yy = 0; yy < H(); yy += 18) {
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W(), yy); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCup() {
+  const cx = cup.x, cy = cup.y, r = cup.r;
+
+  // 穴の影
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 4, r, r * 0.38, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fill();
+  ctx.restore();
+
+  // 穴
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, r, r * 0.36, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fill();
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.restore();
+
+  // フラッグポール
+  ctx.save();
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx + 2, cy - 6);
+  ctx.lineTo(cx + 2, cy - 55);
+  ctx.stroke();
+  // フラッグ
+  ctx.fillStyle = '#e00';
+  ctx.beginPath();
+  ctx.moveTo(cx + 2, cy - 55);
+  ctx.lineTo(cx + 28, cy - 45);
+  ctx.lineTo(cx + 2, cy - 35);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // カップ内バナナ
+  cupBananas.forEach(b => {
+    drawEmoji('🍌', b.x, b.y - 14, b.rot, 28);
+  });
+}
+
+function drawLanded() {
+  bananas.forEach(b => drawEmoji('🍌', b.x, b.y, b.rot, 30));
+}
+
+function drawFlying() {
+  if (!flying) return;
+
+  // トレイル
+  ctx.save();
+  flying.trail.forEach((p, i) => {
+    const a = (i / flying.trail.length) * 0.5;
+    const s = 4 * (i / flying.trail.length);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, s, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,230,0,${a})`;
+    ctx.fill();
+  });
+  ctx.restore();
+
+  drawEmoji('🍌', flying.x, flying.y, flying.rot, 40);
+}
+
+function drawLauncher() {
+  if (flying) return;
+  drawEmoji('🍌', W() / 2, H() - LAUNCH_Y_OFFSET, 0, 44);
+}
+
+function drawAimGuide() {
+  if (!touchStart || !touchCurrent || flying) return;
+  const dx = touchCurrent.x - touchStart.x;
+  const dy = touchCurrent.y - touchStart.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 6) return;
+
+  const power = Math.min(dist / 12, MAX_POWER);
+  const angle = Math.atan2(dy, dx);
+
+  // 軌道プレビュー
+  let px = W() / 2, py = H() - LAUNCH_Y_OFFSET;
+  let pvx = Math.cos(angle) * power;
+  let pvy = Math.sin(angle) * power;
+
+  ctx.save();
+  ctx.setLineDash([6, 8]);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,100,0.55)';
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  for (let i = 0; i < 80; i++) {
+    px += pvx; py += pvy; pvy += GRAVITY;
+    if (py > H() || px < -60 || px > W() + 60) break;
+    ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+
+  // パワーゲージ
+  const pct = power / MAX_POWER;
+  const gw = 120, gh = 10;
+  const gx = W() / 2 - gw / 2;
+  const gy = H() - 40;
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.roundRect(gx, gy, gw, gh, 5);
+  ctx.fill();
+  const col = pct < 0.5 ? `hsl(${100 - pct * 100},90%,50%)` : `hsl(${100 - pct * 100},90%,50%)`;
+  ctx.fillStyle = col;
+  ctx.roundRect(gx, gy, gw * pct, gh, 5);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawUI() {
+  ctx.save();
+  // スコア
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`🍌 ${score} / ${attempts}`, 16, H() - 18);
+
+  // ガイドメッセージ
+  if (attempts === 0) {
+    ctx.textAlign = 'center';
+    ctx.font = '18px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillText('スワイプしてバナナをカップへ！', W() / 2, H() / 2 + 60);
+  }
+  ctx.restore();
+}
+
+function drawFlash() {
+  if (flashTimer <= 0) return;
+  const a = (flashTimer / 40) * 0.4;
+  ctx.fillStyle = `rgba(255,240,50,${a})`;
+  ctx.fillRect(0, 0, W(), H());
+
+  if (celebTimer > 0) {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 52px serif';
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(1, celebTimer / 20)})`;
+    ctx.fillText('カップイン！🎉', W() / 2, H() / 2);
+    ctx.restore();
+  }
+}
+
+// ── メインループ ──────────────────────────────────────────
+function loop() {
+  update();
+  drawGreen();
+  drawFlash();
+  drawCup();
+  drawLanded();
+  drawFlying();
+  drawLauncher();
+  drawAimGuide();
+  drawUI();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
