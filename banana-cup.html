@@ -218,9 +218,9 @@ function update() {
   flying.rot += flying.vx * 0.06;
   flying.age++;
 
-  // カップイン判定（高さと速度）
+  // カップイン判定（上昇・下降どちらでも判定、当たり判定は視覚半径の2倍）
   const cup = COURSE.cup();
-  if (Math.hypot(flying.x - cup.x, flying.y - cup.y) < cup.r * 1.1 && flying.vy > -4) {
+  if (Math.hypot(flying.x - cup.x, flying.y - cup.y) < cup.r * 6.0) {
     score++;
     flashTimer = 45; celebTimer = 70;
     message = 'カップイン！'; messageTimer = 120;
