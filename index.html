@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>落石注意！登山岩避けゲーム</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a2a1a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Arial', sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  canvas { display: block; border-radius: 8px; }
+  #ui {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 20px;
+    color: #fff;
+    font-size: 17px;
+    font-weight: bold;
+    pointer-events: none;
+    z-index: 10;
+    text-shadow: 1px 1px 4px #000;
+  }
+  #score-display { color: #ffe066; }
+  #level-display { color: #88ffcc; }
+  #lives-display { color: #ff8888; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <span id="score-display">SCORE: 0</span>
+  <span id="level-display">LV: 1</span>
+  <span id="lives-display">♥♥♥</span>
+</div>
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width  = Math.min(window.innerWidth,  420);
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── ゲーム状態 ──────────────────────────────
+let state = 'title';
+let score = 0, lives = 3, level = 1, frame = 0;
+let hiScore = parseInt(localStorage.getItem('climbHiScore') || '0');
+
+// ── 道（山道）レイアウト ──────────────────────
+const PATH_W_RATIO = 0.62;
+let pathX, pathW;
+function initPath() {
+  pathW = canvas.width * PATH_W_RATIO;
+  pathX = (canvas.width - pathW) / 2;
+}
+initPath();
+window.addEventListener('resize', initPath);
+
+const LANE_COUNT = 5;
+function laneCenter(lane) { return pathX + (lane + 0.5) * (pathW / LANE_COUNT); }
+
+// ── プレーヤー ──────────────────────────────
+const player = {
+  lane: 2, targetLane: 2,
+  x: 0, y: 0,
+  w: 28, h: 52,
+  invincible: 0,
+  walkFrame: 0,
+};
+
+// ── 岩・パーティクル ─────────────────────────
+let rocks = [], particles = [];
+
+// スクロール用の石畳タイル
+let tiles = [];
+function initTiles() {
+  tiles = [];
+  for (let i = 0; i < 30; i++) tiles.push({ y: (canvas.height / 30) * i });
+}
+initTiles();
+window.addEventListener('resize', initTiles);
+
+// 背景の木・草
+let scenery = [];
+function initScenery() {
+  scenery = [];
+  for (let i = 0; i < 18; i++) {
+    const side = Math.random() < 0.5 ? 'L' : 'R';
+    scenery.push({
+      side,
+      x: side === 'L'
+        ? Math.random() * (pathX - 10)
+        : pathX + pathW + Math.random() * (canvas.width - pathX - pathW - 10),
+      y: Math.random() * canvas.height,
+      h: 30 + Math.random() * 50,
+      type: Math.random() < 0.6 ? 'tree' : 'bush',
+    });
+  }
+}
+initScenery();
+
+// ── レベル設定 ───────────────────────────────
+function cfg(lv) {
+  return {
+    speed:         3.5 + lv * 1.1,
+    spawnInterval: Math.max(30, 90 - lv * 7),
+    maxRocks:      Math.min(2 + Math.floor(lv / 1.5), 7),
+    scrollSpeed:   5  + lv * 1.3,
+  };
+}
+
+// ── 岩スポーン ────────────────────────────────
+function spawnRock() {
+  const c = cfg(level);
+  const usedLanes = rocks.filter(r => r.y < canvas.height * 0.25).map(r => r.lane);
+  let lane, tries = 0;
+  do { lane = Math.floor(Math.random() * LANE_COUNT); tries++; }
+  while (usedLanes.includes(lane) && tries < 20);
+
+  const sizeRand = Math.random();
+  const sz   = sizeRand < 0.2 ? 'big' : sizeRand < 0.6 ? 'mid' : 'small';
+  const rMap  = { big: 40, mid: 28, small: 18 };
+  const spMap = { big: 0.72, mid: 1.0, small: 1.4 };
+  const r     = rMap[sz];
+  const speed = c.speed * spMap[sz] * (0.88 + Math.random() * 0.24);
+
+  rocks.push({
+    lane, x: laneCenter(lane), y: -r,
+    r, speed, sz,
+    angle: Math.random() * Math.PI * 2,
+    spin:  (Math.random() - 0.5) * 0.14,
+    col:   ['#9e8870','#887060','#a09080','#7a6a5a'][Math.floor(Math.random()*4)],
+    dustTimer: 0,
+  });
+}
+
+// ── パーティクル ──────────────────────────────
+function spawnDust(x, y, big) {
+  const n = big ? 22 : 12;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 2 + Math.random() * (big ? 6 : 4);
+    particles.push({
+      x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 1,
+      life: 1, decay: 0.035 + Math.random()*0.03,
+      r: 4 + Math.random()*(big?8:4),
+      col: big ? '#ff8844' : '#c8a87a',
+    });
+  }
+}
+
+// ── 入力 ──────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (state === 'title' || state === 'gameover') { startGame(); return; }
+  if (state !== 'playing') return;
+  if (e.key === 'ArrowLeft')  movePlayer(-1);
+  if (e.key === 'ArrowRight') movePlayer(1);
+});
+
+let touchStartX = null;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (state !== 'playing') { startGame(); return; }
+  touchStartX = e.touches[0].clientX;
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (state !== 'playing' || touchStartX === null) return;
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  if (Math.abs(dx) > 15) movePlayer(dx > 0 ? 1 : -1);
+  touchStartX = null;
+}, { passive: false });
+canvas.addEventListener('click', e => {
+  if (state !== 'playing') { startGame(); return; }
+  const rect = canvas.getBoundingClientRect();
+  movePlayer((e.clientX - rect.left) < canvas.width / 2 ? -1 : 1);
+});
+
+function movePlayer(dir) {
+  const n = player.targetLane + dir;
+  if (n < 0 || n >= LANE_COUNT) return;
+  player.targetLane = n;
+}
+
+function startGame() {
+  state = 'playing';
+  score = lives = 3; score = 0; level = 1; frame = 0;
+  rocks = []; particles = [];
+  player.lane = player.targetLane = 2;
+  player.invincible = 0;
+  initTiles();
+}
+
+// ── 衝突判定（円 vs 矩形） ─────────────────────
+function hit(rock) {
+  const rx = player.x - player.w/2, ry = player.y,
+        rw = player.w,              rh = player.h;
+  const cx = Math.max(rx, Math.min(rock.x, rx+rw));
+  const cy = Math.max(ry, Math.min(rock.y, ry+rh));
+  const dx = rock.x - cx, dy = rock.y - cy;
+  return dx*dx + dy*dy < rock.r * rock.r * 0.55;
+}
+
+// ── 更新 ──────────────────────────────────────
+function update() {
+  if (state !== 'playing') return;
+  frame++;
+  score++;
+  level = Math.floor(score / 500) + 1;
+  const c = cfg(level);
+
+  // プレーヤー
+  player.x += (laneCenter(player.targetLane) - player.x) * 0.16;
+  player.y  = canvas.height - player.h - 38;
+  if (player.invincible > 0) player.invincible--;
+  player.walkFrame += 0.22;
+
+  // 道スクロール
+  for (const t of tiles) {
+    t.y += c.scrollSpeed;
+    if (t.y > canvas.height) t.y -= canvas.height;
+  }
+
+  // 景色スクロール
+  for (const s of scenery) {
+    s.y += c.scrollSpeed * 0.6;
+    if (s.y > canvas.height + 60) s.y = -80;
+  }
+
+  // 岩スポーン
+  if (frame % c.spawnInterval === 0 && rocks.length < c.maxRocks) spawnRock();
+  if (level >= 4 && frame % (c.spawnInterval * 2 + 10) === 0 && rocks.length < c.maxRocks - 1) spawnRock();
+
+  // 岩更新
+  for (let i = rocks.length - 1; i >= 0; i--) {
+    const rock = rocks[i];
+    rock.y    += rock.speed;
+    rock.angle += rock.spin;
+    rock.dustTimer++;
+    if (rock.dustTimer % 8 === 0) {
+      // 転がる砂煙
+      particles.push({
+        x: rock.x + (Math.random()-0.5)*rock.r,
+        y: rock.y + rock.r * 0.5,
+        vx: (Math.random()-0.5)*1.5, vy: -0.5 - Math.random(),
+        life: 1, decay: 0.09, r: 3+Math.random()*4, col: '#d4b896',
+      });
+    }
+
+    if (player.invincible === 0 && hit(rock)) {
+      spawnDust(rock.x, rock.y, true);
+      rocks.splice(i, 1);
+      lives--;
+      player.invincible = 90;
+      if (lives <= 0) {
+        state = 'dead';
+        setTimeout(() => {
+          if (score > hiScore) { hiScore = score; localStorage.setItem('climbHiScore', hiScore); }
+          state = 'gameover';
+        }, 1400);
+      }
+      continue;
+    }
+    if (rock.y - rock.r > canvas.height) rocks.splice(i, 1);
+  }
+
+  // パーティクル
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.12;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // UI
+  document.getElementById('score-display').textContent = `SCORE: ${score}`;
+  document.getElementById('level-display').textContent  = `LV: ${level}`;
+  document.getElementById('lives-display').textContent  = '♥'.repeat(Math.max(lives,0)) + '♡'.repeat(Math.max(3-lives,0));
+}
+
+// ── 描画ヘルパー ──────────────────────────────
+
+function drawSky() {
+  const H = canvas.height, W = canvas.width;
+  // 空のグラデーション（山の朝焼けイメージ）
+  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.38);
+  sky.addColorStop(0,   '#4a6fa5');
+  sky.addColorStop(0.5, '#7ba3c8');
+  sky.addColorStop(1,   '#c8dde8');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H * 0.38);
+
+  // 遠景の山シルエット
+  ctx.fillStyle = '#6a8a6a';
+  ctx.beginPath();
+  ctx.moveTo(0, H*0.38);
+  const peaks = [[0,0.28],[0.12,0.16],[0.25,0.08],[0.38,0.18],[0.5,0.06],[0.62,0.15],[0.75,0.10],[0.88,0.20],[1,0.28],[1,0.38]];
+  for (const [px,py] of peaks) ctx.lineTo(px*W, py*H);
+  ctx.closePath();
+  ctx.fill();
+
+  // 雪帽子
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  [[0.25,0.08,0.06],[0.5,0.06,0.05],[0.75,0.10,0.04]].forEach(([px,py,sz]) => {
+    ctx.beginPath();
+    ctx.moveTo(px*W, py*H);
+    ctx.lineTo((px-sz)*W, (py+sz*1.2)*H);
+    ctx.lineTo((px+sz)*W, (py+sz*1.2)*H);
+    ctx.closePath();
+    ctx.fill();
+  });
+}
+
+function drawPath() {
+  const H = canvas.height, W = canvas.width;
+
+  // 両脇の草・土
+  const grass = ctx.createLinearGradient(0, H*0.3, 0, H);
+  grass.addColorStop(0, '#4a6a3a');
+  grass.addColorStop(1, '#3a5a2a');
+  ctx.fillStyle = grass;
+  ctx.fillRect(0, H*0.3, W, H*0.7);
+
+  // 山道（土色）
+  const road = ctx.createLinearGradient(0, H*0.3, 0, H);
+  road.addColorStop(0, '#b8a070');
+  road.addColorStop(0.5,'#a08858');
+  road.addColorStop(1, '#907848');
+  ctx.fillStyle = road;
+  ctx.fillRect(pathX, H*0.3, pathW, H*0.7);
+
+  // 石畳テクスチャ（タイル）
+  ctx.strokeStyle = 'rgba(80,60,40,0.25)';
+  ctx.lineWidth = 1;
+  for (const t of tiles) {
+    for (let col = 0; col < LANE_COUNT; col++) {
+      const x = pathX + col * (pathW/LANE_COUNT);
+      const w = pathW / LANE_COUNT - 1;
+      ctx.strokeRect(x + 2, t.y - 22, w - 4, 20);
+    }
+  }
+
+  // 道の端の土手
+  const bank = ctx.createLinearGradient(0, 0, 1, 0);
+  bank.addColorStop(0, '#2a4a1a'); bank.addColorStop(1, '#3a5a2a');
+  ctx.fillStyle = '#2a4020';
+  ctx.fillRect(0, H*0.28, pathX - 2, H*0.72);
+  ctx.fillRect(pathX + pathW + 2, H*0.28, W - pathX - pathW, H*0.72);
+
+  // 道の縁石（石）
+  ctx.fillStyle = '#8a7a5a';
+  ctx.fillRect(pathX - 6, H*0.3, 6, H*0.7);
+  ctx.fillRect(pathX + pathW, H*0.3, 6, H*0.7);
+}
+
+function drawScenery() {
+  for (const s of scenery) {
+    ctx.save();
+    if (s.type === 'tree') {
+      // 幹
+      ctx.fillStyle = '#5a3a1a';
+      ctx.fillRect(s.x - 3, s.y - s.h * 0.35, 6, s.h * 0.4);
+      // 葉
+      ctx.fillStyle = '#2a5a2a';
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y - s.h);
+      ctx.lineTo(s.x - s.h*0.35, s.y - s.h*0.3);
+      ctx.lineTo(s.x + s.h*0.35, s.y - s.h*0.3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#3a6a3a';
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y - s.h*1.1);
+      ctx.lineTo(s.x - s.h*0.25, s.y - s.h*0.55);
+      ctx.lineTo(s.x + s.h*0.25, s.y - s.h*0.55);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#3a6a2a';
+      ctx.beginPath();
+      ctx.ellipse(s.x, s.y - s.h*0.3, s.h*0.4, s.h*0.3, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawRock(rock) {
+  ctx.save();
+  ctx.translate(rock.x, rock.y);
+  ctx.rotate(rock.angle);
+
+  const sides = rock.sz === 'big' ? 7 : rock.sz === 'mid' ? 6 : 5;
+  const r = rock.r;
+  ctx.beginPath();
+  for (let i = 0; i < sides; i++) {
+    const a = (Math.PI*2/sides)*i;
+    const jt = 0.72 + Math.sin(i*2.7)*0.28;
+    i===0 ? ctx.moveTo(Math.cos(a)*r*jt, Math.sin(a)*r*jt)
+           : ctx.lineTo(Math.cos(a)*r*jt, Math.sin(a)*r*jt);
+  }
+  ctx.closePath();
+
+  const g = ctx.createRadialGradient(-r*0.3,-r*0.3,0,0,0,r);
+  g.addColorStop(0,'#ccc');
+  g.addColorStop(0.4, rock.col);
+  g.addColorStop(1,'#3a3028');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = '#4a3828'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // ひびの線
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-r*0.15,-r*0.35); ctx.lineTo(r*0.1,r*0.2);
+  ctx.moveTo(r*0.05,-r*0.2);  ctx.lineTo(-r*0.1,r*0.15);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // 影
+  ctx.save();
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(rock.x+5, rock.y+8, rock.r*0.75, rock.r*0.35, 0,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── 人間（ハイカー）の描画 ──────────────────────
+function drawHiker() {
+  if (player.invincible > 0 && Math.floor(player.invincible/6)%2===0) return;
+  const px = player.x, py = player.y;
+  const wf = player.walkFrame;
+  const legSwing = Math.sin(wf) * 7;
+  const armSwing = Math.sin(wf + Math.PI) * 8;
+  const bodyBob  = Math.abs(Math.sin(wf)) * 2;
+
+  ctx.save();
+  ctx.translate(px, py - bodyBob);
+
+  // ── ザック（リュック） ──
+  ctx.fillStyle = '#cc4400';
+  ctx.beginPath();
+  ctx.roundRect(4, 4, 13, 20, 3);
+  ctx.fill();
+  ctx.fillStyle = '#aa3300';
+  ctx.fillRect(5, 22, 11, 4); // 底部
+
+  // ── 胴体（登山ジャケット） ──
+  ctx.fillStyle = '#3355aa';
+  ctx.beginPath();
+  ctx.roundRect(-10, 14, 20, 22, 4);
+  ctx.fill();
+
+  // ジャケットのライン
+  ctx.strokeStyle = '#2244cc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-2, 14); ctx.lineTo(-2, 36); ctx.stroke();
+
+  // ── 頭 ──
+  ctx.fillStyle = '#e8b88a'; // 肌色
+  ctx.beginPath(); ctx.arc(0, 7, 9, 0, Math.PI*2); ctx.fill();
+
+  // ヘルメット（登山用）
+  ctx.fillStyle = '#dd2222';
+  ctx.beginPath();
+  ctx.ellipse(0, 3, 10, 7, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#bb1111';
+  ctx.fillRect(-11, 3, 22, 3);
+
+  // 顔（目）
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.arc(-3, 8, 1.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(3,  8, 1.5, 0, Math.PI*2); ctx.fill();
+
+  // ── 腕（ストック持ち） ──
+  // 左腕
+  ctx.strokeStyle = '#3355aa'; ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-10, 18);
+  ctx.lineTo(-14 - armSwing*0.4, 34 + Math.abs(armSwing)*0.2);
+  ctx.stroke();
+
+  // 右腕
+  ctx.beginPath();
+  ctx.moveTo(10, 18);
+  ctx.lineTo(14 + armSwing*0.4, 34 + Math.abs(armSwing)*0.2);
+  ctx.stroke();
+
+  // ストック（左）
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-14 - armSwing*0.4, 34 + Math.abs(armSwing)*0.2);
+  ctx.lineTo(-16 - armSwing*0.3, 52);
+  ctx.stroke();
+  // ストック先端
+  ctx.fillStyle = '#555';
+  ctx.beginPath(); ctx.arc(-16 - armSwing*0.3, 52, 2.5, 0, Math.PI*2); ctx.fill();
+
+  // ストック（右）
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(14 + armSwing*0.4, 34 + Math.abs(armSwing)*0.2);
+  ctx.lineTo(16 + armSwing*0.3, 52);
+  ctx.stroke();
+  ctx.fillStyle = '#555';
+  ctx.beginPath(); ctx.arc(16 + armSwing*0.3, 52, 2.5, 0, Math.PI*2); ctx.fill();
+
+  // ── 脚 ──
+  // 左脚（登山パンツ）
+  ctx.strokeStyle = '#224488'; ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(-5, 36);
+  ctx.lineTo(-6, 46 + legSwing*0.5);
+  ctx.stroke();
+  // 左足（登山靴）
+  ctx.fillStyle = '#3a2810';
+  ctx.beginPath();
+  ctx.ellipse(-7, 49 + legSwing*0.5, 7, 4, -0.2, 0, Math.PI*2);
+  ctx.fill();
+
+  // 右脚
+  ctx.strokeStyle = '#224488'; ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(5, 36);
+  ctx.lineTo(6, 46 - legSwing*0.5);
+  ctx.stroke();
+  // 右足
+  ctx.fillStyle = '#3a2810';
+  ctx.beginPath();
+  ctx.ellipse(7, 49 - legSwing*0.5, 7, 4, 0.2, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+
+  // 足元の影
+  ctx.save();
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.ellipse(px, py + player.h - 5 - bodyBob, 14, 5, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life * 0.8;
+    ctx.fillStyle = p.col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// 警告サインの点滅（落石注意）
+let warnTimer = 0;
+function drawWarnings() {
+  warnTimer++;
+  for (const rock of rocks) {
+    if (rock.y < canvas.height * 0.15) {
+      const alpha = 0.5 + 0.5 * Math.sin(warnTimer * 0.3);
+      const wx = rock.x, wy = canvas.height * 0.06;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#ff4400';
+      ctx.beginPath();
+      ctx.moveTo(wx, wy - 12);
+      ctx.lineTo(wx - 11, wy + 8);
+      ctx.lineTo(wx + 11, wy + 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', wx, wy + 6);
+      ctx.restore();
+    }
+  }
+}
+
+function drawTitle() {
+  const W = canvas.width, H = canvas.height;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 20;
+  ctx.fillStyle = '#ff8800';
+  ctx.font = `bold ${W*0.075}px Arial`;
+  ctx.fillText('⛰ 落石注意！', W/2, H*0.28);
+
+  ctx.shadowColor = '#ffcc00'; ctx.shadowBlur = 10;
+  ctx.fillStyle = '#ffe566';
+  ctx.font = `bold ${W*0.11}px Arial`;
+  ctx.fillText('岩　避　け', W/2, H*0.40);
+
+  ctx.fillStyle = '#88ffcc';
+  ctx.font = `${W*0.042}px Arial`;
+  ctx.shadowBlur = 0;
+  ctx.fillText('登山中に落石が！素早く避けろ！', W/2, H*0.51);
+  ctx.fillStyle = '#ccc';
+  ctx.font = `${W*0.036}px Arial`;
+  ctx.fillText('← → キー  /  タップで操作', W/2, H*0.58);
+  ctx.fillText('左タップ → 左　右タップ → 右', W/2, H*0.63);
+
+  if (hiScore > 0) {
+    ctx.fillStyle = '#ffd700';
+    ctx.font = `bold ${W*0.048}px Arial`;
+    ctx.fillText(`🏆 BEST: ${hiScore}`, W/2, H*0.73);
+  }
+
+  const bw=W*0.6, bh=H*0.075, bx=(W-bw)/2, by=H*0.82;
+  ctx.fillStyle='#ff6600'; ctx.shadowColor='#ff6600'; ctx.shadowBlur=18;
+  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,bh/2); ctx.fill();
+  ctx.shadowBlur=0; ctx.fillStyle='#fff';
+  ctx.font=`bold ${W*0.05}px Arial`;
+  ctx.fillText('タップしてスタート', W/2, by+bh*0.65);
+  ctx.restore();
+}
+
+function drawGameOver() {
+  const W = canvas.width, H = canvas.height;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+
+  ctx.shadowColor = '#ff2200'; ctx.shadowBlur = 28;
+  ctx.fillStyle = '#ff4444';
+  ctx.font = `bold ${W*0.1}px Arial`;
+  ctx.fillText('GAME OVER', W/2, H*0.35);
+
+  ctx.fillStyle = '#fff8';
+  ctx.font = `${W*0.042}px Arial`;
+  ctx.shadowBlur = 0;
+  ctx.fillText('落石にやられてしまった…', W/2, H*0.45);
+
+  ctx.fillStyle = '#ffd700'; ctx.shadowColor='#ffd700'; ctx.shadowBlur=8;
+  ctx.font = `bold ${W*0.065}px Arial`;
+  ctx.fillText(`SCORE: ${score}`, W/2, H*0.55);
+
+  if (score >= hiScore) {
+    ctx.fillStyle='#ff8800'; ctx.font=`bold ${W*0.05}px Arial`;
+    ctx.fillText('NEW RECORD! 🎉', W/2, H*0.63);
+  } else {
+    ctx.fillStyle='#aaa'; ctx.shadowBlur=0;
+    ctx.font=`${W*0.04}px Arial`;
+    ctx.fillText(`BEST: ${hiScore}`, W/2, H*0.63);
+  }
+
+  const bw=W*0.6,bh=H*0.075,bx=(W-bw)/2,by=H*0.73;
+  ctx.fillStyle='#ff6600'; ctx.shadowColor='#ff6600'; ctx.shadowBlur=18;
+  ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,bh/2); ctx.fill();
+  ctx.shadowBlur=0; ctx.fillStyle='#fff';
+  ctx.font=`bold ${W*0.05}px Arial`;
+  ctx.fillText('もう一度挑戦！', W/2, by+bh*0.65);
+  ctx.restore();
+}
+
+// ── メインループ ──────────────────────────────
+function loop() {
+  update();
+
+  // 背景・道
+  drawSky();
+  drawScenery();
+  drawPath();
+
+  // 岩・パーティクル
+  for (const rock of rocks) drawRock(rock);
+  drawParticles();
+
+  // 主人公
+  if (state === 'playing' || state === 'dead') drawHiker();
+
+  // 落石警告
+  if (state === 'playing') drawWarnings();
+
+  // オーバーレイ
+  if (state === 'title')    drawTitle();
+  if (state === 'gameover') drawGameOver();
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
