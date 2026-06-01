@@ -191,15 +191,42 @@ function update() {
   }
 }
 
-// ── 描画ヘルパー ──────────────────────────────────────────
-function drawEmoji(emoji, x, y, rot, size) {
+// ── バナナ ベクター描画 ────────────────────────────────────
+// canvas上の絵文字はモバイルで黒くなるためベクターパスで描く
+function drawBanana(x, y, rot, size) {
+  const s = size / 40;
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(rot);
-  ctx.font = `${size}px serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(emoji, 0, 0);
+  ctx.scale(s, s);
+
+  // 本体（三日月形）
+  ctx.beginPath();
+  ctx.moveTo(-18, 10);
+  ctx.bezierCurveTo(-24, -10, -8, -22, 8, -20);
+  ctx.bezierCurveTo(22, -18, 26, -4, 20, 10);
+  ctx.bezierCurveTo(16, 18, -14, 18, -18, 10);
+  ctx.closePath();
+
+  const grad = ctx.createLinearGradient(-10, -22, 10, 18);
+  grad.addColorStop(0, '#FFE135');
+  grad.addColorStop(0.5, '#FFCC00');
+  grad.addColorStop(1, '#E6A800');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = '#C8960C';
+  ctx.lineWidth = 1.5 / s;
+  ctx.stroke();
+
+  // 先端（茶色のへた）
+  ctx.fillStyle = '#6B3A00';
+  ctx.beginPath();
+  ctx.ellipse(-19, 10, 3.5, 2.5, 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(21, 10, 3.5, 2.5, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
 }
 
@@ -262,12 +289,12 @@ function drawCup() {
 
   // カップ内バナナ
   cupBananas.forEach(b => {
-    drawEmoji('🍌', b.x, b.y - 14, b.rot, 28);
+    drawBanana(b.x, b.y - 14, b.rot, 28);
   });
 }
 
 function drawLanded() {
-  bananas.forEach(b => drawEmoji('🍌', b.x, b.y, b.rot, 30));
+  bananas.forEach(b => drawBanana(b.x, b.y, b.rot, 30));
 }
 
 function drawFlying() {
@@ -285,12 +312,12 @@ function drawFlying() {
   });
   ctx.restore();
 
-  drawEmoji('🍌', flying.x, flying.y, flying.rot, 40);
+  drawBanana(flying.x, flying.y, flying.rot, 40);
 }
 
 function drawLauncher() {
   if (flying) return;
-  drawEmoji('🍌', W() / 2, H() - LAUNCH_Y_OFFSET, 0, 44);
+  drawBanana(W() / 2, H() - LAUNCH_Y_OFFSET, 0, 44);
 }
 
 function drawAimGuide() {
@@ -343,7 +370,7 @@ function drawUI() {
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.font = 'bold 22px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(`🍌 ${score} / ${attempts}`, 16, H() - 18);
+  ctx.fillText(`IN: ${score} / ${attempts}`, 16, H() - 18);
 
   // ガイドメッセージ
   if (attempts === 0) {
@@ -366,7 +393,7 @@ function drawFlash() {
     ctx.textAlign = 'center';
     ctx.font = 'bold 52px serif';
     ctx.fillStyle = `rgba(255,255,255,${Math.min(1, celebTimer / 20)})`;
-    ctx.fillText('カップイン！🎉', W() / 2, H() / 2);
+    ctx.fillText('カップイン！', W() / 2, H() / 2);
     ctx.restore();
   }
 }
